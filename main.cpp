@@ -9,14 +9,23 @@
 #include "compute_shader.h"
 #include "SSBO.h"
 #include "mesh.h"
-#include "gpu.h"
 #include "timer.h"
+#include "vertex.h"
+#include "sdf.h"
 
 #include <random>
 #include "time.h"
 
 using namespace std;
 using namespace glm;
+
+
+struct Meta_buf{
+    int SDF_SZ, VERT_SZ, OCT_SZ, vert_tail;
+    vec3 center;
+    float radius;
+    int sdf_tail;
+};
 
 float frameBegin(unsigned& i, float& t){
     float dt = (float)glfwGetTime() - t;
@@ -55,43 +64,57 @@ int main(int argc, char** argv){
 	GLProgram color("vert.glsl", "frag.glsl");
 	ComputeShader depth("depth.glsl");
     
-	SDF_BUF* sdf_buf = new SDF_BUF();
+    const int t_count = 128;
     
-    // init sdf_buf data
+    Meta_buf meta;
+    meta.SDF_SZ = 1024;
+    meta.OCT_SZ = (meta.SDF_SZ >> 1) * (8 << 0) + 
+            (meta.SDF_SZ >> 2) * (8 << 3) +
+            (meta.SDF_SZ >> 3) * (8 << 6) +
+            (meta.SDF_SZ >> 4) * (8 << 9) + 
+            (meta.SDF_SZ >> 5) * (8 << 12);
+    meta.VERT_SZ = 50000;
+    meta.center = vec3(0.0f);
+    meta.radius = 1.0f;
+    meta.vert_tail = 0;
+    meta.sdf_tail = 0;
     
-    printf("Size of gpu buffer: %zu\n", sizeof(SDF_BUF));
-    
-    sdf_buf->center = vec3(0.0f);
-    sdf_buf->radius = 1.0f;
-    sdf_buf->output_tail = 0;
-    sdf_buf->sdf_tail = 0;
-    
+    int* L = new int[meta.OCT_SZ];
+    vertex* verts = new vertex[meta.VERT_SZ];
+    sdf* items = new sdf[meta.SDF_SZ];
+        
     {
-        sdf& item = sdf_buf->items[sdf_buf->sdf_tail];
+        sdf& item = items[0];
         item.location = vec3(0.0f);
         item.type = SDF_SPHERE;
         item.scale = vec3(0.5f);
-        item.id = sdf_buf->sdf_tail;
-        sdf_buf->sdf_tail++;
+        item.id = 0;
+        meta.sdf_tail = 1;
     }
     
+    SSBO meta_bo(&meta, sizeof(Meta_buf), 0);
+    SSBO L_bo(L, sizeof(int) * meta.OCT_SZ, 1);
+    SSBO items_bo(items, sizeof(sdf) * meta.SDF_SZ, 2);
+    SSBO verts_bo(verts, sizeof(vertex) * meta.VERT_SZ, 3);
+    
+    Mesh mesh;
     Timer timer;
-	SSBO sdfbuf(sdf_buf, sizeof(SDF_BUF), 3);
     
     depth.bind();
     timer.begin();
-    depth.call(262144 / 64, 1, 1);
+    depth.call((8 << 15) / t_count, 1, 1);
     glMemoryBarrier(GL_ALL_BARRIER_BITS);
     timer.endPrint();
     
     // copy back data from ssbo
-    sdfbuf.download(sdf_buf, 0, sizeof(SDF_BUF));
-    if(sdf_buf->output_tail > VERT_COUNT)
-        sdf_buf->output_tail = VERT_COUNT;
-    printf("Points: %i\n", sdf_buf->output_tail);
+    meta_bo.download(&meta, 0, sizeof(Meta_buf));
+    if(meta.vert_tail > meta.VERT_SZ)
+        meta.vert_tail = meta.VERT_SZ;
+    verts_bo.download(verts, 0, sizeof(vertex) * meta.vert_tail);
+    glMemoryBarrier(GL_ALL_BARRIER_BITS);
+    printf("Points: %i\n", meta.vert_tail);
+    mesh.upload(meta.vert_tail, verts);
     
-    Mesh mesh;
-    mesh.upload(sdf_buf->output_tail, &sdf_buf->verts[0]);
     glEnable(GL_PROGRAM_POINT_SIZE);
     glEnable(GL_DEPTH_TEST);
 	
@@ -111,31 +134,33 @@ int main(int argc, char** argv){
         
         if(input.leftMouseDown() && (frame_i & 1) == 0){
             vec3 forward = camera.getEye() + normalize(camera.getAt() - camera.getEye());
-            sdf_buf->sdf_tail++;
-            sdf_buf->sdf_tail &= (SDF_COUNT - 1);
-            sdf& item = sdf_buf->items[sdf_buf->sdf_tail];
+            meta.sdf_tail++;
+            meta.sdf_tail &= (meta.SDF_SZ - 1);
+            sdf& item = items[meta.sdf_tail];
             item.location = forward;
             item.type = SDF_SPHERE;
-            item.scale = vec3(0.05f);
-            item.id = sdf_buf->sdf_tail;
+            item.scale = vec3(0.01f);
+            item.id = meta.sdf_tail;
             
-            sdf_buf->output_tail = 0;
+            meta.vert_tail = 0;
             
-            sdfbuf.upload(sdf_buf, sizeof(SDF_BUF));
+            meta_bo.upload(&meta, sizeof(Meta_buf));
+            items_bo.upload(items, sizeof(sdf) * meta.SDF_SZ);
             
             depth.bind();
             timer.begin();
-            depth.call((8 << 15) / 64, 1, 1);
+            depth.call((8 << 15) / t_count, 1, 1);
             glMemoryBarrier(GL_ALL_BARRIER_BITS);
             timer.endPrint();
             
             // copy back data from ssbo
-            sdfbuf.download(sdf_buf, 0, sizeof(SDF_BUF));
+            meta_bo.download(&meta, 0, sizeof(Meta_buf));
+            if(meta.vert_tail > meta.VERT_SZ)
+                meta.vert_tail = meta.VERT_SZ;
+            verts_bo.download(verts, 0, sizeof(vertex) * meta.vert_tail);
             glMemoryBarrier(GL_ALL_BARRIER_BITS);
-            if(sdf_buf->output_tail > VERT_COUNT)
-                sdf_buf->output_tail = VERT_COUNT;
-            printf("Points: %i\n", sdf_buf->output_tail);
-            mesh.upload(sdf_buf->output_tail, &sdf_buf->verts[0]);
+            printf("Points: %i\n", meta.vert_tail);
+            mesh.upload(meta.vert_tail, verts);
             color.bind();
         }
         
@@ -144,7 +169,9 @@ int main(int argc, char** argv){
         window.swap();
     }
     
-    delete sdf_buf;
+    delete[] verts;
+    delete[] items;
+    delete[] L;
 
     return 0;
 }

@@ -1,7 +1,7 @@
 #include "myglheaders.h"
 #include "mesh.h"
 #include "debugmacro.h"
-#include "gpu.h"
+#include "vertex.h"
 
 Mesh::Mesh(){
 	num_vertices = 0;

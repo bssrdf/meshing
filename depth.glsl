@@ -1,6 +1,6 @@
 #version 430 core
 
-layout(local_size_x = 64) in;
+layout(local_size_x = 128) in;
 
 struct sdf{
 	vec3 location;
@@ -21,23 +21,29 @@ struct vertex{
 #define SDF_BOX 1
 #define SDF_PLANE 2
 
-#define SDF_COUNT 256
-#define VERT_COUNT 50000
-
-layout(binding=3) buffer SDF_BUF
+layout(binding=0) buffer META_BUF
 {
-    sdf items[SDF_COUNT];
-    int L[  (SDF_COUNT >> 1) * (8 << 0) + 
-            (SDF_COUNT >> 2) * (8 << 3) +
-            (SDF_COUNT >> 3) * (8 << 6) +
-            (SDF_COUNT >> 4) * (8 << 9) + 
-            (SDF_COUNT >> 5) * (8 << 12) 
-        ];
-    vertex verts[VERT_COUNT];
-    vec3 center;
-    float radius;
-    int output_tail, sdf_tail, pad1, pad2;
+    int SDF_SZ, VERT_SZ, OCT_SZ, vert_tail;
+    vec3 center; float radius;
+    int sdf_tail;
 };
+
+layout(binding=1) buffer OCT_BUF
+{
+    int L[];
+};
+
+layout(binding=2) buffer SDF_BUF
+{
+    sdf items[];
+};
+
+layout(binding=3) buffer VERT_BUF
+{
+    vertex verts[];
+};
+
+
 
 float sphere(vec3 ray, float rad){
     return length(ray) - rad;
@@ -71,15 +77,15 @@ void make_point(vec3 location, int id){
         location -= N * dis;
     }
     int obj_id = items[id].id;
-    if(output_tail < VERT_COUNT){
-        int tail = atomicAdd(output_tail, 1);
+    if(vert_tail < VERT_SZ){
+        int tail = atomicAdd(vert_tail, 1);
         verts[tail] = vertex(location, obj_id, N, 0.0);
     }
 }
 
 uint depth_offset(uint depth){
     uint of = 0;
-    uint sz = SDF_COUNT >> 1;
+    uint sz = SDF_SZ >> 1;
     uint ct = 8;
     for(uint i = 1; i < depth; i++){
         of += sz * ct;
@@ -90,8 +96,8 @@ uint depth_offset(uint depth){
 }
 
 void do_level(uint pdepth, uint cdepth, uint prev_group, uint group, vec3 loc, float rad){
-    uint sz1 = SDF_COUNT >> pdepth;
-    uint sz2 = SDF_COUNT >> cdepth;
+    uint sz1 = SDF_SZ >> pdepth;
+    uint sz2 = SDF_SZ >> cdepth;
     uint tail = 0;
     uint basea = depth_offset(pdepth);
     uint baseb = depth_offset(cdepth);
@@ -111,7 +117,7 @@ void do_level(uint pdepth, uint cdepth, uint prev_group, uint group, vec3 loc, f
 
 void do_base(uint group, vec3 loc, float rad){
     uint tail = 0;
-    uint sz = SDF_COUNT >> 1;
+    uint sz = SDF_SZ >> 1;
     for(int i = 0; i < sdf_tail && tail < sz; i++){
         float dis = abs(map(loc, i));
         if(dis < rad){
@@ -125,7 +131,7 @@ void do_base(uint group, vec3 loc, float rad){
 
 void do_leaf(uint pdepth, uint prev_group, vec3 loc, float rad){
     uint basea = depth_offset(pdepth);
-    uint sz = SDF_COUNT >> pdepth;
+    uint sz = SDF_SZ >> pdepth;
     for(uint i = 0; i < sz; i++){
         int id = L[basea + prev_group * sz + i];
         if(id < 0)
@@ -149,7 +155,8 @@ void main(){
         float qlen = 1.732051f * rad;
         duplicates = duplicates >> 3;
         uint group = gl_GlobalInvocationID.x / duplicates;
-        bool leader = (gl_GlobalInvocationID.x % duplicates) == 0;
+        uint offset = gl_GlobalInvocationID.x % duplicates;
+        bool leader = offset == 0;
         
         newpos.x += ((group & 1) == 1) ? rad : -rad;
         newpos.y += ((group & 2) == 2) ? rad : -rad;
